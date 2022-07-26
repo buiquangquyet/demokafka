@@ -39,50 +39,62 @@ class consumerBill extends Command
      */
     public function handle()
     {
-        $conf = new Conf();
-        $conf->set('log_level', (string) LOG_DEBUG);
-        $conf->set('debug', 'all');
-        $rk = new Consumer($conf);
-        $rk->addBrokers("127.0.0.1");
+        $queue = env('KAFKA_QUEUE');
+        $conf = new \RdKafka\Conf();
+        $conf->setRebalanceCb(function (\RdKafka\KafkaConsumer $kafka, $err, array $partitions = null) {
+            switch ($err) {
+                case RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS:
+                    echo "Assign: ";
+                    $kafka->assign($partitions);
+                    break;
 
-//        $topic = $rk->newTopic(env('KAFKA_QUEUE'));
-//
-//// The first argument is the partition to consume from.
-//// The second argument is the offset at which to start consumption. Valid values
-//// are: RD_KAFKA_OFFSET_BEGINNING, RD_KAFKA_OFFSET_END, RD_KAFKA_OFFSET_STORED.
-//        $topic->consumeStart(0, RD_KAFKA_OFFSET_BEGINNING);
-//        while (true) {
-//            // The first argument is the partition (again).
-//            // The second argument is the timeout.
-//            $msg = $topic->consume(0, 1000);
-//            if (null === $msg || $msg->err === RD_KAFKA_RESP_ERR__PARTITION_EOF) {
-//                // Constant check required by librdkafka 0.11.6. Newer librdkafka versions will return NULL instead.
-//                dd($msg);
-//                echo '123'.PHP_EOL;
-//                continue;
-//            } elseif ($msg->err) {
-//                echo $msg->errstr(), "\n";
-//                break;
-//            } else {
-//                echo $msg->payload, "\n";
-//            }
-//        }
-        $queue = $rk->newQueue();
-        $topic1 = $rk->newTopic(env('KAFKA_QUEUE'));
-        $topic1->consumeQueueStart(0, RD_KAFKA_OFFSET_BEGINNING, $queue);
-        //$topic1->consumeQueueStart(1, RD_KAFKA_OFFSET_BEGINNING, $queue);
+                case RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS:
+                    echo "Revoke: ";
+                    $kafka->assign(NULL);
+                    break;
+
+                default:
+                    throw new Exception($err);
+            }
+        });
+        $conf->set('group.id', env('KAFKA_CONSUMER_GROUP_ID', 'laravel_queue'));
+        $conf->set('metadata.broker.list', env('KAFKA_BROKERS', 'localhost:9092'));
+        $conf->set('auto.offset.reset', 'largest');
+        $conf->set('enable.auto.commit', 'true');
+//        $conf->set('auto.commit.interval.ms', '101');
+
+        $consumer = new \RdKafka\KafkaConsumer($conf);
+        $consumer->subscribe([$queue]);
+        $this->line("START PULL");
         while (true) {
-            // The only argument is the timeout.
-            $msg = $queue->consume(1000);
-            if (null === $msg || $msg->err === RD_KAFKA_RESP_ERR__PARTITION_EOF) {
-                // Constant check required by librdkafka 0.11.6. Newer librdkafka versions will return NULL instead.
-                continue;
-            } elseif ($msg->err) {
-                echo $msg->errstr(), "\n";
-                break;
-            } else {
-                echo $msg->payload, "\n";
-                cache()->set('111', $msg->payload, 60*60);
+            $message = $consumer->consume(120 * 1000);
+            switch ($message->err) {
+                case RD_KAFKA_RESP_ERR_NO_ERROR:
+                    $this->line(json_encode($message));
+                    // check trong redis có offset của message chưa, nếu có rồi thì sẽ không xử lý
+//                    try {
+//                        $key = 'market-' . $message->partition . '-' . $message->offset;
+//                        $rsps = Redis::setnx($key, $key);
+//                        if ($rsps <= 0) {
+//                            LogHelper::channel('kafka')->error('KAFKA-DUPLICATE: ' . json_encode($message));
+//                        } else {
+//                            Redis::expire($key, 60); // 10 minutes
+//                            dispatch(new ProcessKDNQueueKafka((array) $message));
+//                        }
+//                    } catch (\Exception $e) { // nếu trường hợp lỗi redis thì sẽ push job bình thường - vì có cơ chế chặn
+//                        LogHelper::channel('kafka')->error('KAFKA-PULL-ERROR: ' . $e->getMessage());
+//                        dispatch(new ProcessKDNQueueKafka((array) $message));
+//                    }
+                    break;
+                case RD_KAFKA_RESP_ERR__PARTITION_EOF:
+                    $this->line("'[' . date('H:i:s') . \"][partition {$message->partition}] No more messages; will wait for more [key: '{$message->key}' offset: {$message->offset}]\n");
+                    break;
+                case RD_KAFKA_RESP_ERR__TIMED_OUT:
+                    $this->line('[' . date('H:i:s') . "] Timed out \n");
+                    break;
+                default:
+                    throw new \Exception($message->errstr(), $message->err);
+                    break;
             }
         }
 
