@@ -82,6 +82,7 @@ class consumerBill extends Command
                 break;
             } else {
                 echo $msg->payload, "\n";
+                cache()->set('111', $msg->payload, 60*60);
             }
         }
 
